@@ -226,13 +226,13 @@ if (NOT HAVE_CRYPTO)
 endif()
 
 if(MSVC)
-  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-  add_compile_definitions(_CRT_NONSTDC_NO_DEPRECATE)
+  add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+  add_definitions(-D_CRT_NONSTDC_NO_DEPRECATE)
 endif(MSVC)
 
 if(WIN32)
   if(CMAKE_SYSTEM_NAME MATCHES WindowsPhone OR CMAKE_SYSTEM_NAME MATCHES WindowsStore)
-    add_compile_definitions(MS_UWP)
+    add_definitions(-DMS_UWP)
   endif(CMAKE_SYSTEM_NAME MATCHES WindowsPhone OR CMAKE_SYSTEM_NAME MATCHES WindowsStore)
 endif(WIN32)
 
