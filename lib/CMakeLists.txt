@@ -166,7 +166,7 @@ if(HAVE_CRYPTO)
   target_sources(zip PRIVATE zip_winzip_aes.c zip_source_winzip_aes_decode.c zip_source_winzip_aes_encode.c)
 endif()
 
-if(SHARED_LIB_VERSIONNING)
+if(LIBZIP_SHARED_LIB_VERSIONNING)
   set_target_properties(zip PROPERTIES VERSION 5.3 SOVERSION 5)
 endif()
 
