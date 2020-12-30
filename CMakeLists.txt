@@ -175,7 +175,12 @@ int main(int argc, char *argv[]) { }" HAVE_NULLABLE)
 
 test_big_endian(WORDS_BIGENDIAN)
 
+cmake_policy(PUSH)
+if(NOT("${CMAKE_VERSION}" VERSION_LESS 3.12))
+  cmake_policy(SET CMP0074 NEW)
+endif()
 find_package(ZLIB 1.1.2 REQUIRED)
+cmake_policy(POP)
 
 if(LIBZIP_ENABLE_BZIP2)
   find_package(BZip2)
