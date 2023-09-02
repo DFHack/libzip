@@ -239,4 +239,7 @@ string(APPEND zip_err_str [=[}\;
 
 const int _zip_err_details_count = sizeof(_zip_err_details)/sizeof(_zip_err_details[0])\;
 ]=])
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/zip_err_str.c ${zip_err_str})
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/zip_err_str.c.in ${zip_err_str})
+file(COPY_FILE  ${CMAKE_CURRENT_BINARY_DIR}/zip_err_str.c.in
+  ${CMAKE_CURRENT_BINARY_DIR}/zip_err_str.c
+  ONLY_IF_DIFFERENT)
