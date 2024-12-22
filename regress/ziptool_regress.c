@@ -10,26 +10,40 @@ typedef enum { SOURCE_TYPE_NONE, SOURCE_TYPE_IN_MEMORY, SOURCE_TYPE_HOLE } sourc
 
 source_type_t source_type = SOURCE_TYPE_NONE;
 zip_uint64_t fragment_size = 0;
+zip_file_t *z_files[16];
+unsigned int z_files_count;
+int commands_from_stdin = 0;
 
-static int add_nul(int argc, char *argv[]);
-static int cancel(int argc, char *argv[]);
-static int unchange_one(int argc, char *argv[]);
-static int unchange_all(int argc, char *argv[]);
-static int zin_close(int argc, char *argv[]);
+static int add_nul(char *argv[]);
+static int cancel(char *argv[]);
+static int extract_as(char *argv[]);
+static int regress_fopen(char *argv[]);
+static int regress_fread(char *argv[]);
+static int regress_fseek(char *argv[]);
+static int is_seekable(char *argv[]);
+static int unchange_one(char *argv[]);
+static int unchange_all(char *argv[]);
+static int zin_close(char *argv[]);
 
-#define OPTIONS_REGRESS "F:Hm"
+#define OPTIONS_REGRESS "F:Himx"
 
-#define USAGE_REGRESS " [-Hm] [-F fragment-size]"
+#define USAGE_REGRESS " [-Himx] [-F fragment-size]"
 
 #define GETOPT_REGRESS                              \
     case 'H':                                       \
         source_type = SOURCE_TYPE_HOLE;             \
+        break;                                      \
+    case 'i':                                       \
+        commands_from_stdin = 1;                    \
         break;                                      \
     case 'm':                                       \
         source_type = SOURCE_TYPE_IN_MEMORY;        \
         break;                                      \
     case 'F':                                       \
         fragment_size = strtoull(optarg, NULL, 10); \
+        break;                                      \
+    case 'x':                                       \
+        hex_encoded_filenames = 1;                  \
         break;
 
 /* clang-format off */
@@ -37,29 +51,87 @@ static int zin_close(int argc, char *argv[]);
 #define DISPATCH_REGRESS \
     {"add_nul", 2, "name length", "add NUL bytes", add_nul}, \
     {"cancel", 1, "limit", "cancel writing archive when limit% have been written (calls print_progress)", cancel}, \
+    {"extract_as", 2, "index name", "extract file data to given file name", extract_as}, \
+    {"fopen", 1, "name", "open archive entry", regress_fopen}, \
+    {"fread", 2, "file_index length", "read from fopened file and print", regress_fread}, \
+    {"fseek", 3, "file_index offset whence", "seek in fopened file", regress_fseek}, \
+    {"is_seekable", 1, "index", "report if entry is seekable", is_seekable}, \
     {"unchange", 1, "index", "revert changes for entry", unchange_one}, \
     {"unchange_all", 0, "", "revert all changes", unchange_all}, \
-    { "zin_close", 1, "index", "close input zip_source (for internal tests)", zin_close }
+    {"zin_close", 1, "index", "close input zip_source (for internal tests)", zin_close}
+
+#define PRECLOSE_REGRESS                                         \
+  do {                                                           \
+      unsigned int file_idx = 0;                                 \
+      for (file_idx = 0; file_idx < z_files_count; ++file_idx) { \
+          if (zip_fclose (z_files[file_idx]) != 0) {             \
+              err = 1;                                           \
+          }                                                      \
+      }                                                          \
+  }                                                              \
+  while (0)
 
 /* clang-format on */
 
+#define MAX_STDIN_ARGC  128
+#define MAX_STDIN_LENGTH    8192
+
+char* stdin_argv[MAX_STDIN_ARGC];
+static char stdin_line[MAX_STDIN_LENGTH];
+
+int get_stdin_commands(void);
+
+#define REGRESS_PREPARE_ARGS                \
+    if (commands_from_stdin) {              \
+        argc = get_stdin_commands();        \
+        arg = 0;                            \
+        argv = stdin_argv;                  \
+    }
 
 zip_t *ziptool_open(const char *archive, int flags, zip_error_t *error, zip_uint64_t offset, zip_uint64_t len);
 
 
 #include "ziptool.c"
 
+int get_stdin_commands(void) {
+    int argc = 0;
+    char *p, *word;
+    fgets(stdin_line, sizeof(stdin_line), stdin);
+    word = p = stdin_line;
+    while (1) {
+        if (*p == ' ' || *p == '\n') {
+            *p = '\0';
+            if (word[0] != '\0') {
+                stdin_argv[argc] = word;
+                argc += 1;
+                if (argc >= MAX_STDIN_ARGC) {
+                    break;
+                }
+            }
+            word = p + 1;
+        }
+        else if (*p == '\0') {
+            if (word[0] != '\0') {
+                stdin_argv[argc] = word;
+                argc += 1;
+            }
+            break;
+        }
+        p += 1;
+    }
+    return argc;
+}
 
 zip_source_t *memory_src = NULL;
 
+static int get_whence(const char *str);
 zip_source_t *source_hole_create(const char *, int flags, zip_error_t *);
-
 static zip_t *read_to_memory(const char *archive, int flags, zip_error_t *error, zip_source_t **srcp);
 static zip_source_t *source_nul(zip_t *za, zip_uint64_t length);
 
 
 static int
-add_nul(int argc, char *argv[]) {
+add_nul(char *argv[]) {
     zip_source_t *zs;
     zip_uint64_t length = strtoull(argv[1], NULL, 10);
 
@@ -68,7 +140,7 @@ add_nul(int argc, char *argv[]) {
         return -1;
     }
 
-    if (zip_add(za, argv[0], zs) == -1) {
+    if (zip_file_add(za, argv[0], zs, 0) == -1) {
         zip_source_free(zs);
         fprintf(stderr, "can't add file '%s': %s\n", argv[0], zip_strerror(za));
         return -1;
@@ -77,7 +149,99 @@ add_nul(int argc, char *argv[]) {
 }
 
 static int
-unchange_all(int argc, char *argv[]) {
+cancel_callback(zip_t *archive, void *ud) {
+    if (progress_userdata.percentage >= progress_userdata.limit) {
+        return -1;
+    }
+    return 0;
+}
+
+static int
+cancel(char *argv[]) {
+    zip_int64_t percent;
+    percent = strtoll(argv[0], NULL, 10);
+    if (percent > 100 || percent < 0) {
+        fprintf(stderr, "invalid percentage '%" PRId64 "' for cancel (valid: 0 <= x <= 100)\n", percent);
+        return -1;
+    }
+    progress_userdata.limit = ((double)percent) / 100;
+
+    zip_register_cancel_callback_with_state(za, cancel_callback, NULL, NULL);
+
+    /* needs the percentage updates from print_progress */
+    print_progress(argv);
+    return 0;
+}
+
+static int
+extract_as(char *argv[]) {
+    zip_uint64_t idx;
+    FILE *fp;
+    int ret;
+
+    idx = strtoull(argv[0], NULL, 10);
+    if ((fp=fopen(argv[1], "wb")) == NULL) {
+        fprintf(stderr, "can't open output file '%s': %s", argv[1], strerror(errno));
+        return -1;
+    }
+    ret = cat_impl_backend(idx, 0, -1, fp);
+    if (fclose(fp) != 0) {
+        fprintf(stderr, "can't close output file '%s': %s", argv[1], strerror(errno));
+        ret = -1;
+    }
+    return ret;
+}
+
+
+static int
+is_seekable(char *argv[]) {
+    zip_uint64_t idx;
+    zip_file_t *zf;
+
+    idx = strtoull(argv[0], NULL, 10);
+    if ((zf = zip_fopen_index(za, idx, 0)) == NULL) {
+        fprintf(stderr, "can't open file at index '%" PRIu64 "': %s\n", idx, zip_strerror(za));
+        return -1;
+    }
+    switch (zip_file_is_seekable(zf)) {
+    case -1:
+	fprintf(stderr, "can't check if file %" PRIu64 " is seekable: %s\n", idx, zip_strerror(za));
+	return -1;
+    case 0:
+	printf("%" PRIu64 ": NOT seekable\n", idx);
+	break;
+    case 1:
+	printf("%" PRIu64 ": seekable\n", idx);
+	break;
+    }
+    return 0;
+}
+
+static int
+regress_fseek(char *argv[]) {
+    zip_uint64_t file_idx;
+    zip_file_t *zf;
+    zip_int64_t offset;
+    int whence;
+
+    file_idx = strtoull(argv[0], NULL, 10);
+    offset = strtoll(argv[1], NULL, 10);
+    whence = get_whence(argv[2]);
+    if (file_idx >= z_files_count || z_files[file_idx] == NULL) {
+        fprintf(stderr, "trying to seek in invalid opened file\n");
+        return -1;
+    }
+    zf = z_files[file_idx];
+
+    if (zip_fseek(zf, offset, whence) == -1) {
+	fprintf(stderr, "can't seek in file %" PRIu64 ": %s\n", file_idx, zip_strerror(za));
+	return -1;
+    }
+    return 0;
+}
+
+static int
+unchange_all(char *argv[]) {
     if (zip_unchange_all(za) < 0) {
         fprintf(stderr, "can't revert changes to archive: %s\n", zip_strerror(za));
         return -1;
@@ -87,7 +251,7 @@ unchange_all(int argc, char *argv[]) {
 
 
 static int
-unchange_one(int argc, char *argv[]) {
+unchange_one(char *argv[]) {
     zip_uint64_t idx;
 
     idx = strtoull(argv[0], NULL, 10);
@@ -100,34 +264,8 @@ unchange_one(int argc, char *argv[]) {
     return 0;
 }
 
-
 static int
-cancel_callback(zip_t *archive, void *ud) {
-    if (progress_userdata.percentage >= progress_userdata.limit) {
-        return -1;
-    }
-    return 0;
-}
-
-static int
-cancel(int argc, char *argv[]) {
-    zip_int64_t percent;
-    percent = strtoll(argv[0], NULL, 10);
-    if (percent > 100 || percent < 0) {
-        fprintf(stderr, "invalid percentage '%" PRId64 "' for cancel (valid: 0 <= x <= 100)\n", percent);
-        return -1;
-    }
-    progress_userdata.limit = ((double)percent) / 100;
-
-    zip_register_cancel_callback_with_state(za, cancel_callback, NULL, NULL);
-
-    /* needs the percentage updates from print_progress */
-    print_progress(argc, argv);
-    return 0;
-}
-
-static int
-zin_close(int argc, char *argv[]) {
+zin_close(char *argv[]) {
     zip_uint64_t idx;
 
     idx = strtoull(argv[0], NULL, 10);
@@ -142,6 +280,68 @@ zin_close(int argc, char *argv[]) {
     z_in[idx] = z_in[z_in_count];
     z_in_count--;
 
+    return 0;
+}
+
+static int
+regress_fopen(char *argv[]) {
+    if (z_files_count >= (sizeof(z_files) / sizeof(*z_files))) {
+        fprintf(stderr, "too many open files\n");
+        return -1;
+    }
+    if ((z_files[z_files_count] = zip_fopen(za, argv[0], 0)) == NULL) {
+        fprintf(stderr, "can't open entry '%s' from input archive: %s\n", argv[0], zip_strerror(za));
+        return -1;
+    }
+    printf("opened '%s' as file %u\n", argv[0], z_files_count);
+    z_files_count += 1;
+    return 0;
+}
+
+
+static int
+regress_fread(char *argv[]) {
+    zip_uint64_t file_idx;
+    zip_uint64_t length;
+    char buf[8192];
+    zip_int64_t n;
+    zip_file_t *f;
+
+    file_idx = strtoull(argv[0], NULL, 10);
+    length = strtoull(argv[1], NULL, 10);
+
+    if (file_idx >= z_files_count || z_files[file_idx] == NULL) {
+        fprintf(stderr, "trying to read from invalid opened file\n");
+        return -1;
+    }
+    f = z_files[file_idx];
+    while (length > 0) {
+        zip_uint64_t to_read;
+
+        if (length > sizeof (buf)) {
+            to_read = sizeof (buf);
+        } else {
+            to_read = length;
+        }
+        n = zip_fread(f, buf, to_read);
+        if (n < 0) {
+            fprintf(stderr, "can't read opened file %" PRIu64 ": %s\n", file_idx, zip_file_strerror(f));
+            return -1;
+        }
+        if (n == 0) {
+#if 0
+            fprintf(stderr, "premature end of opened file %" PRIu64 "\n", file_idx);
+            return -1;
+#else
+            break;
+#endif
+        }
+        if (fwrite(buf, (size_t)n, 1, stdout) != 1) {
+            fprintf(stderr, "can't write file contents to stdout: %s\n", strerror(errno));
+            return -1;
+        }
+        length -= n;
+    }
     return 0;
 }
 
@@ -161,6 +361,22 @@ read_hole(const char *archive, int flags, zip_error_t *error) {
     }
 
     return zs;
+}
+
+
+static int get_whence(const char *str) {
+    if (strcasecmp(str, "set") == 0) {
+        return SEEK_SET;
+    }
+    else if (strcasecmp(str, "cur") == 0) {
+        return SEEK_CUR;
+    }
+    else if (strcasecmp(str, "end") == 0) {
+        return SEEK_END;
+    }
+    else {
+        return 100; /* invalid */
+    }
 }
 
 

@@ -3,10 +3,10 @@
 
 /*
   zip_source_file_win32.h -- common header for Windows file implementation
-  Copyright (C) 2020 Dieter Baron and Thomas Klausner
+  Copyright (C) 2020-2024 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -59,6 +59,7 @@ struct zip_win32_file_operations {
     BOOL(__stdcall *move_file)(const void *from, const void *to, DWORD flags);
     BOOL(__stdcall *set_file_attributes)(const void *name, DWORD attributes);
     char *(*string_duplicate)(const char *string);
+    HANDLE(__stdcall *find_first_file)(const void *name, void *data);
 };
 
 typedef struct zip_win32_file_operations zip_win32_file_operations_t;

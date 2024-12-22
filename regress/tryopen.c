@@ -1,9 +1,9 @@
 /*
   tryopen.c -- tool for tests that try opening zip archives
-  Copyright (C) 1999-2021 Dieter Baron and Thomas Klausner
+  Copyright (C) 1999-2024 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -46,6 +46,7 @@
     "\t-c\tcheck consistency\n"        \
     "\t-e\texclusively open archive\n" \
     "\t-n\tcreate new file\n"          \
+    "\t-s\tprint error string\n"       \
     "\t-t\ttruncate file to size 0\n"
 
 
@@ -55,11 +56,13 @@ main(int argc, char *argv[]) {
     zip_t *z;
     int c, flags, ze;
     zip_int64_t count;
-    int error;
+    int error_count;
+    zip_error_t error;
+    int error_strings = 0;
 
     flags = 0;
 
-    while ((c = getopt(argc, argv, "cent")) != -1) {
+    while ((c = getopt(argc, argv, "censt")) != -1) {
         switch (c) {
         case 'c':
             flags |= ZIP_CHECKCONS;
@@ -69,6 +72,9 @@ main(int argc, char *argv[]) {
             break;
         case 'n':
             flags |= ZIP_CREATE;
+            break;
+        case 's':
+            error_strings = 1;
             break;
         case 't':
             flags |= ZIP_TRUNCATE;
@@ -80,7 +86,7 @@ main(int argc, char *argv[]) {
         }
     }
 
-    error = 0;
+    error_count = 0;
     for (; optind < argc; optind++) {
         fname = argv[optind];
         errno = 0;
@@ -92,22 +98,29 @@ main(int argc, char *argv[]) {
             continue;
         }
 
-        printf("opening '%s' returned error %d", fname, ze);
-        switch (zip_error_get_sys_type(ze)) {
+        zip_error_init_with_code(&error, ze);
+        printf("opening '%s' returned error ", fname);
+        if (error_strings) {
+            printf("%s", zip_error_strerror(&error));
+        }
+        else {
+            printf("%d", ze);
+            switch (zip_error_system_type(&error)) {
             case ZIP_ET_SYS:
             case ZIP_ET_LIBZIP:
-                printf("/%d", errno);
+                printf("/%d", zip_error_code_system(&error));
                 break;
-                
+
             default:
                 break;
+            }
         }
         printf("\n");
-        error++;
+        error_count++;
     }
 
-    if (error > 0)
-        fprintf(stderr, "%d errors\n", error);
+    if (error_count > 0)
+        fprintf(stderr, "%d errors\n", error_count);
 
-    return error ? 1 : 0;
+    return error_count ? 1 : 0;
 }

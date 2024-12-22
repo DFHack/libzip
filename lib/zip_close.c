@@ -1,9 +1,9 @@
 /*
   zip_close.c -- close zip archive and update changes
-  Copyright (C) 1999-2021 Dieter Baron and Thomas Klausner
+  Copyright (C) 1999-2024 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -44,7 +44,8 @@
 
 static int add_data(zip_t *, zip_source_t *, zip_dirent_t *, zip_uint32_t);
 static int copy_data(zip_t *, zip_uint64_t);
-static int copy_source(zip_t *, zip_source_t *, zip_int64_t);
+static int copy_source(zip_t *, zip_source_t *, zip_source_t *, zip_int64_t);
+static int torrentzip_compare_names(const void *a, const void *b);
 static int write_cdir(zip_t *, const zip_filelist_t *, zip_uint64_t);
 static int write_data_descriptor(zip_t *za, const zip_dirent_t *dirent, int is_zip64);
 
@@ -61,12 +62,12 @@ zip_close(zip_t *za) {
 
     changed = _zip_changed(za, &survivors);
 
-    /* don't create zip files with no entries */
-    if (survivors == 0) {
+    if (survivors == 0 && !(za->ch_flags & ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE)) {
+        /* don't create zip files with no entries */
         if ((za->open_flags & ZIP_TRUNCATE) || changed) {
             if (zip_source_remove(za->src) < 0) {
                 if (!((zip_error_code_zip(zip_source_error(za->src)) == ZIP_ER_REMOVE) && (zip_error_code_system(zip_source_error(za->src)) == ENOENT))) {
-                    _zip_error_set_from_source(&za->error, za->src);
+                    zip_error_set_from_source(&za->error, za->src);
                     return -1;
                 }
             }
@@ -75,7 +76,8 @@ zip_close(zip_t *za) {
         return 0;
     }
 
-    if (!changed) {
+    /* Always write empty archive if we are told to keep it, otherwise it wouldn't be created if the file doesn't already exist. */
+    if (!changed && survivors > 0) {
         zip_discard(za);
         return 0;
     }
@@ -105,6 +107,7 @@ zip_close(zip_t *za) {
         }
 
         filelist[j].idx = i;
+        filelist[j].name = zip_get_name(za, i, 0);
         j++;
     }
     if (j < survivors) {
@@ -113,7 +116,11 @@ zip_close(zip_t *za) {
         return -1;
     }
 
-    if ((zip_source_supports(za->src) & ZIP_SOURCE_MAKE_COMMAND_BITMASK(ZIP_SOURCE_BEGIN_WRITE_CLONING)) == 0) {
+    if (ZIP_WANT_TORRENTZIP(za)) {
+        qsort(filelist, (size_t)survivors, sizeof(filelist[0]), torrentzip_compare_names);
+    }
+
+    if (ZIP_WANT_TORRENTZIP(za) || (zip_source_supports(za->src) & ZIP_SOURCE_MAKE_COMMAND_BITMASK(ZIP_SOURCE_BEGIN_WRITE_CLONING)) == 0) {
         unchanged_offset = 0;
     }
     else {
@@ -146,7 +153,7 @@ zip_close(zip_t *za) {
     }
     if (unchanged_offset == 0) {
         if (zip_source_begin_write(za->src) < 0) {
-            _zip_error_set_from_source(&za->error, za->src);
+            zip_error_set_from_source(&za->error, za->src);
             free(filelist);
             return -1;
         }
@@ -178,7 +185,7 @@ zip_close(zip_t *za) {
             continue;
         }
 
-        new_data = (ZIP_ENTRY_DATA_CHANGED(entry) || ZIP_ENTRY_CHANGED(entry, ZIP_DIRENT_COMP_METHOD) || ZIP_ENTRY_CHANGED(entry, ZIP_DIRENT_ENCRYPTION_METHOD));
+        new_data = (ZIP_ENTRY_DATA_CHANGED(entry) || ZIP_ENTRY_CHANGED(entry, ZIP_DIRENT_COMP_METHOD) || ZIP_ENTRY_CHANGED(entry, ZIP_DIRENT_ENCRYPTION_METHOD)) || (ZIP_WANT_TORRENTZIP(za) && !ZIP_IS_TORRENTZIP(za));
 
         /* create new local directory entry */
         if (entry->changes == NULL) {
@@ -195,8 +202,12 @@ zip_close(zip_t *za) {
             break;
         }
 
+        if (ZIP_WANT_TORRENTZIP(za)) {
+            zip_dirent_torrentzip_normalize(entry->changes);
+        }
+
         if ((off = zip_source_tell_write(za->src)) < 0) {
-            _zip_error_set_from_source(&za->error, za->src);
+            zip_error_set_from_source(&za->error, za->src);
             error = 1;
             break;
         }
@@ -207,7 +218,7 @@ zip_close(zip_t *za) {
 
             zs = NULL;
             if (!ZIP_ENTRY_DATA_CHANGED(entry)) {
-                if ((zs = _zip_source_zip_new(za, i, ZIP_FL_UNCHANGED, 0, 0, NULL, &za->error)) == NULL) {
+                if ((zs = zip_source_zip_file_create(za, i, ZIP_FL_UNCHANGED, 0, -1, NULL, &za->error)) == NULL) {
                     error = 1;
                     break;
                 }
@@ -240,7 +251,7 @@ zip_close(zip_t *za) {
                 break;
             }
             if (zip_source_seek(za->src, (zip_int64_t)offset, SEEK_SET) < 0) {
-                _zip_error_set_from_source(&za->error, za->src);
+                zip_error_set_from_source(&za->error, za->src);
                 error = 1;
                 break;
             }
@@ -267,7 +278,7 @@ zip_close(zip_t *za) {
 
     if (!error) {
         if (zip_source_commit_write(za->src) != 0) {
-            _zip_error_set_from_source(&za->error, za->src);
+            zip_error_set_from_source(&za->error, za->src);
             error = 1;
         }
         _zip_progress_end(za->progress);
@@ -284,8 +295,7 @@ zip_close(zip_t *za) {
 }
 
 
-static int
-add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
+static int add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
     zip_int64_t offstart, offdata, offend, data_length;
     zip_stat_t st;
     zip_file_attributes_t attributes;
@@ -294,19 +304,24 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
     int is_zip64;
     zip_flags_t flags;
     bool needs_recompress, needs_decompress, needs_crc, needs_compress, needs_reencrypt, needs_decrypt, needs_encrypt;
+    bool have_dos_time, dirent_changed;
+    time_t mtime_before_copy;
 
     if (zip_source_stat(src, &st) < 0) {
-        _zip_error_set_from_source(&za->error, src);
+        zip_error_set_from_source(&za->error, src);
         return -1;
     }
+
+    de->bitflags &= ~ZIP_GPBF_DATA_DESCRIPTOR;
 
     if ((st.valid & ZIP_STAT_COMP_METHOD) == 0) {
         st.valid |= ZIP_STAT_COMP_METHOD;
         st.comp_method = ZIP_CM_STORE;
     }
 
-    if (ZIP_CM_IS_DEFAULT(de->comp_method) && st.comp_method != ZIP_CM_STORE)
+    if (ZIP_CM_IS_DEFAULT(de->comp_method) && st.comp_method != ZIP_CM_STORE) {
         de->comp_method = st.comp_method;
+    }
     else if (de->comp_method == ZIP_CM_STORE && (st.valid & ZIP_STAT_SIZE)) {
         st.valid |= ZIP_STAT_COMP_SIZE;
         st.comp_size = st.size;
@@ -324,6 +339,7 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
     flags = ZIP_EF_LOCAL;
 
     if ((st.valid & ZIP_STAT_SIZE) == 0) {
+        /* TODO: not valid for torrentzip */
         flags |= ZIP_FL_FORCE_ZIP64;
         data_length = -1;
     }
@@ -350,6 +366,7 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
             }
 
             if (max_compressed_size > 0xffffffffu) {
+                /* TODO: not valid for torrentzip */
                 flags |= ZIP_FL_FORCE_ZIP64;
             }
         }
@@ -359,18 +376,34 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
         }
     }
 
+    if ((de->changed & ZIP_DIRENT_LAST_MOD) == 0) {
+        int ret2 = zip_source_get_dos_time(src, &de->last_mod);
+        if (ret2 < 0) {
+            zip_error_set_from_source(&za->error, src);
+            return -1;
+        }
+        if (ret2 == 1) {
+            have_dos_time = true;
+        }
+        else {
+            if (st.valid & ZIP_STAT_MTIME) {
+                mtime_before_copy = st.mtime;
+            }
+            else {
+                time(&mtime_before_copy);
+            }
+            if (_zip_u2d_time(mtime_before_copy, &de->last_mod, &za->error) < 0) {
+                return -1;
+            }
+        }
+    }
+
     if ((offstart = zip_source_tell_write(za->src)) < 0) {
-        _zip_error_set_from_source(&za->error, za->src);
+        zip_error_set_from_source(&za->error, za->src);
         return -1;
     }
 
-    /* as long as we don't support non-seekable output, clear data descriptor bit */
-    de->bitflags &= (zip_uint16_t)~ZIP_GPBF_DATA_DESCRIPTOR;
-    if ((is_zip64 = _zip_dirent_write(za, de, flags)) < 0) {
-        return -1;
-    }
-
-    needs_recompress = st.comp_method != ZIP_CM_ACTUAL(de->comp_method);
+    needs_recompress = ZIP_WANT_TORRENTZIP(za) || st.comp_method != ZIP_CM_ACTUAL(de->comp_method);
     needs_decompress = needs_recompress && (st.comp_method != ZIP_CM_STORE);
     /* in these cases we can compute the CRC ourselves, so we do */
     needs_crc = (st.comp_method == ZIP_CM_STORE) || needs_decompress;
@@ -382,6 +415,11 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
 
     src_final = src;
     zip_source_keep(src_final);
+
+    if (!needs_decrypt && st.encryption_method == ZIP_EM_TRAD_PKWARE && (de->changed & ZIP_DIRENT_LAST_MOD)) {
+        /* PKWare encryption uses the last modification time for password verification, therefore we can't change it without re-encrypting. Ignoring the requested modification time change seems more sensible than failing to close the archive. */
+         de->changed &= ~ZIP_DIRENT_LAST_MOD;
+    }
 
     if (needs_decrypt) {
         zip_encryption_implementation impl;
@@ -397,7 +435,6 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
             return -1;
         }
 
-        zip_source_free(src_final);
         src_final = src_tmp;
     }
 
@@ -407,7 +444,6 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
             return -1;
         }
 
-        zip_source_free(src_final);
         src_final = src_tmp;
     }
 
@@ -417,7 +453,6 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
             return -1;
         }
 
-        zip_source_free(src_final);
         src_final = src_tmp;
     }
 
@@ -427,7 +462,6 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
             return -1;
         }
 
-        zip_source_free(src_final);
         src_final = src_tmp;
     }
 
@@ -448,35 +482,61 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
             zip_source_free(src_final);
             return -1;
         }
+
+        if (de->encryption_method == ZIP_EM_TRAD_PKWARE) {
+            de->bitflags |= ZIP_GPBF_DATA_DESCRIPTOR;
+
+            /* PKWare encryption uses last_mod, make sure it gets the right value. */
+            if (de->changed & ZIP_DIRENT_LAST_MOD) {
+                if ((src_tmp = _zip_source_window_new(src_final, 0, -1, NULL, 0, NULL, &de->last_mod, NULL, 0, true, &za->error)) == NULL) {
+                    zip_source_free(src_final);
+                    return -1;
+                }
+                src_final = src_tmp;
+            }
+        }
+
         if ((src_tmp = impl(za, src_final, de->encryption_method, ZIP_CODEC_ENCODE, password)) == NULL) {
             /* error set by impl */
             zip_source_free(src_final);
             return -1;
         }
-        if (de->encryption_method == ZIP_EM_TRAD_PKWARE) {
-            de->bitflags |= ZIP_GPBF_DATA_DESCRIPTOR;
-        }
 
-        zip_source_free(src_final);
         src_final = src_tmp;
     }
 
+    if (!ZIP_WANT_TORRENTZIP(za)) {
+        if (zip_source_get_file_attributes(src_final, &attributes) != 0) {
+            zip_error_set_from_source(&za->error, src_final);
+            ret = -1;
+        }
+        _zip_dirent_apply_attributes(de, &attributes, (flags & ZIP_FL_FORCE_ZIP64) != 0, changed);
+    }
 
-    if ((offdata = zip_source_tell_write(za->src)) < 0) {
-        _zip_error_set_from_source(&za->error, za->src);
+    /* as long as we don't support non-seekable output, clear data descriptor bit */
+    if ((is_zip64 = _zip_dirent_write(za, de, flags)) < 0) {
+        zip_source_free(src_final);
         return -1;
     }
 
-    ret = copy_source(za, src_final, data_length);
+    if ((offdata = zip_source_tell_write(za->src)) < 0) {
+        zip_error_set_from_source(&za->error, za->src);
+        zip_source_free(src_final);
+        return -1;
+    }
+
+    ret = copy_source(za, src_final, src, data_length);
 
     if (zip_source_stat(src_final, &st) < 0) {
-        _zip_error_set_from_source(&za->error, src_final);
+        zip_error_set_from_source(&za->error, src_final);
         ret = -1;
     }
 
-    if (zip_source_get_file_attributes(src_final, &attributes) != 0) {
-        _zip_error_set_from_source(&za->error, src_final);
-        ret = -1;
+    if (!ZIP_WANT_TORRENTZIP(za)) {
+        if (zip_source_get_file_attributes(src_final, &attributes) != 0) {
+            zip_error_set_from_source(&za->error, src_final);
+            ret = -1;
+        }
     }
 
     zip_source_free(src_final);
@@ -486,12 +546,7 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
     }
 
     if ((offend = zip_source_tell_write(za->src)) < 0) {
-        _zip_error_set_from_source(&za->error, za->src);
-        return -1;
-    }
-
-    if (zip_source_seek_write(za->src, offstart, SEEK_SET) < 0) {
-        _zip_error_set_from_source(&za->error, za->src);
+        zip_error_set_from_source(&za->error, za->src);
         return -1;
     }
 
@@ -500,30 +555,46 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
         return -1;
     }
 
-    if ((de->changed & ZIP_DIRENT_LAST_MOD) == 0) {
-        if (st.valid & ZIP_STAT_MTIME)
-            de->last_mod = st.mtime;
-        else
-            time(&de->last_mod);
-    }
+    dirent_changed = ZIP_CM_ACTUAL(de->comp_method) != st.comp_method || de->crc != st.crc || de->uncomp_size != st.size || de->comp_size != (zip_uint64_t)(offend - offdata);
     de->comp_method = st.comp_method;
     de->crc = st.crc;
     de->uncomp_size = st.size;
     de->comp_size = (zip_uint64_t)(offend - offdata);
-    _zip_dirent_apply_attributes(de, &attributes, (flags & ZIP_FL_FORCE_ZIP64) != 0, changed);
 
-    if ((ret = _zip_dirent_write(za, de, flags)) < 0)
-        return -1;
+    if (!ZIP_WANT_TORRENTZIP(za)) {
+        dirent_changed |= _zip_dirent_apply_attributes(de, &attributes, (flags & ZIP_FL_FORCE_ZIP64) != 0, changed);
 
-    if (is_zip64 != ret) {
-        /* Zip64 mismatch between preliminary file header written before data and final file header written afterwards */
-        zip_error_set(&za->error, ZIP_ER_INTERNAL, 0);
-        return -1;
+        if ((de->changed & ZIP_DIRENT_LAST_MOD) == 0 && !have_dos_time) {
+            if (st.valid & ZIP_STAT_MTIME) {
+                if (st.mtime != mtime_before_copy) {
+                    if (_zip_u2d_time(st.mtime, &de->last_mod, &za->error) < 0) {
+                        return -1;
+                    }
+                    dirent_changed = true;
+                }
+            }
+        }
     }
 
-    if (zip_source_seek_write(za->src, offend, SEEK_SET) < 0) {
-        _zip_error_set_from_source(&za->error, za->src);
-        return -1;
+    if (dirent_changed) {
+        if (zip_source_seek_write(za->src, offstart, SEEK_SET) < 0) {
+            zip_error_set_from_source(&za->error, za->src);
+            return -1;
+        }
+
+        if ((ret = _zip_dirent_write(za, de, flags)) < 0)
+            return -1;
+
+        if (is_zip64 != ret) {
+            /* Zip64 mismatch between preliminary file header written before data and final file header written afterwards */
+            zip_error_set(&za->error, ZIP_ER_INTERNAL, 0);
+            return -1;
+        }
+
+        if (zip_source_seek_write(za->src, offend, SEEK_SET) < 0) {
+            zip_error_set_from_source(&za->error, za->src);
+            return -1;
+        }
     }
 
     if (de->bitflags & ZIP_GPBF_DATA_DESCRIPTOR) {
@@ -539,7 +610,6 @@ add_data(zip_t *za, zip_source_t *src, zip_dirent_t *de, zip_uint32_t changed) {
 static int
 copy_data(zip_t *za, zip_uint64_t len) {
     DEFINE_BYTE_ARRAY(buf, BUFSIZE);
-    size_t n;
     double total = (double)len;
 
     if (!byte_array_init(buf, BUFSIZE)) {
@@ -548,7 +618,8 @@ copy_data(zip_t *za, zip_uint64_t len) {
     }
 
     while (len > 0) {
-        n = len > BUFSIZE ? BUFSIZE : len;
+        zip_uint64_t n = ZIP_MIN(len, BUFSIZE);
+
         if (_zip_read(za->src, buf, n, &za->error) < 0) {
             byte_array_fini(buf);
             return -1;
@@ -573,13 +644,13 @@ copy_data(zip_t *za, zip_uint64_t len) {
 
 
 static int
-copy_source(zip_t *za, zip_source_t *src, zip_int64_t data_length) {
+copy_source(zip_t *za, zip_source_t *src, zip_source_t *src_for_length, zip_int64_t data_length) {
     DEFINE_BYTE_ARRAY(buf, BUFSIZE);
     zip_int64_t n, current;
     int ret;
 
     if (zip_source_open(src) < 0) {
-        _zip_error_set_from_source(&za->error, src);
+        zip_error_set_from_source(&za->error, src);
         return -1;
     }
 
@@ -596,7 +667,13 @@ copy_source(zip_t *za, zip_source_t *src, zip_int64_t data_length) {
             break;
         }
         if (n == BUFSIZE && za->progress && data_length > 0) {
-            current += n;
+            zip_int64_t t;
+            t = zip_source_tell(src_for_length);
+            if (t >= 0) {
+                current = t;
+            } else {
+                current += n;
+            }
             if (_zip_progress_update(za->progress, (double)current / (double)data_length) != 0) {
                 zip_error_set(&za->error, ZIP_ER_CANCELLED, 0);
                 ret = -1;
@@ -606,7 +683,7 @@ copy_source(zip_t *za, zip_source_t *src, zip_int64_t data_length) {
     }
 
     if (n < 0) {
-        _zip_error_set_from_source(&za->error, src);
+        zip_error_set_from_source(&za->error, src);
         ret = -1;
     }
 
@@ -643,7 +720,7 @@ _zip_changed(const zip_t *za, zip_uint64_t *survivorsp) {
     changed = 0;
     survivors = 0;
 
-    if (za->comment_changed || za->ch_flags != za->flags) {
+    if (za->comment_changed || (ZIP_WANT_TORRENTZIP(za) && !ZIP_IS_TORRENTZIP(za))) {
         changed = 1;
     }
 
@@ -695,4 +772,19 @@ write_data_descriptor(zip_t *za, const zip_dirent_t *de, int is_zip64) {
     _zip_buffer_free(buffer);
 
     return ret;
+}
+
+
+static int torrentzip_compare_names(const void *a, const void *b) {
+    const char *aname = ((const zip_filelist_t *)a)->name;
+    const char *bname = ((const zip_filelist_t *)b)->name;
+
+    if (aname == NULL) {
+        return (bname != NULL) * -1;
+    }
+    else if (bname == NULL) {
+        return 1;
+    }
+
+    return strcasecmp(aname, bname);
 }

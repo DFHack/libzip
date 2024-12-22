@@ -1,9 +1,9 @@
 /*
   zip_source_file_win32_ansi.c -- source for Windows file opened by UTF-8 name
-  Copyright (C) 1999-2020 Dieter Baron and Thomas Klausner
+  Copyright (C) 1999-2023 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -49,7 +49,7 @@ zip_source_file_create(const char *fname, zip_uint64_t start, zip_int64_t length
     wchar_t *wfname;
     zip_source_t *source;
 
-    if (fname == NULL || length < -1) {
+    if (fname == NULL || length < ZIP_LENGTH_UNCHECKED) {
         zip_error_set(error, ZIP_ER_INVAL, 0);
         return NULL;
     }

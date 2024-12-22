@@ -1,7 +1,7 @@
 /*
   liboverride.c -- override function called by zip_open()
 
-  Copyright (C) 2017-2021 Dieter Baron and Thomas Klausner
+  Copyright (C) 2017-2022 Dieter Baron and Thomas Klausner
 
   This file is part of ckmame, a program to check rom sets for MAME.
   The authors can be contacted at <ckmame@nih.at>
@@ -66,8 +66,15 @@ main(int argc, const char *argv[]) {
     
     if (getenv("LIBOVERRIDE_SET") == NULL) {
         char *cwd = getcwd(NULL, 0);
-        char *so = (char *)malloc(strlen(cwd) + 64);
-        sprintf(so, "%s/libliboverride.so", cwd);
+        size_t so_size = strlen(cwd) + 64;
+        char *so = (char *)malloc(so_size);
+        if (so == NULL) {
+            if (verbose) {
+                printf("malloc failed\n");
+            }
+            exit(2);
+        }
+        snprintf(so, so_size, "%s/libliboverride.so", cwd);
         setenv("LIBOVERRIDE_SET", "1", 1);
         setenv("LD_PRELOAD", so, 1);
         execv(argv[0], (void *)argv);
@@ -80,7 +87,7 @@ main(int argc, const char *argv[]) {
     if (zip_open("nosuchfile", 0, &error_code) != NULL) {
         /* We expect failure. */
         if (verbose) {
-            printf("open succeded\n");
+            printf("open succeeded\n");
         }
         exit(1);
     }

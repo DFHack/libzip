@@ -1,9 +1,9 @@
 /*
   zip_source_pkware_decode.c -- Traditional PKWARE decryption routines
-  Copyright (C) 2009-2020 Dieter Baron and Thomas Klausner
+  Copyright (C) 2009-2024 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -80,12 +80,12 @@ zip_source_pkware_decode(zip_t *za, zip_source_t *src, zip_uint16_t em, int flag
 static int
 decrypt_header(zip_source_t *src, struct trad_pkware *ctx) {
     zip_uint8_t header[ZIP_CRYPTO_PKWARE_HEADERLEN];
-    struct zip_stat st;
+    zip_stat_t st;
+    zip_dostime_t dostime;
     zip_int64_t n;
-    bool ok = false;
 
     if ((n = zip_source_read(src, header, ZIP_CRYPTO_PKWARE_HEADERLEN)) < 0) {
-        _zip_error_set_from_source(&ctx->error, src);
+        zip_error_set_from_source(&ctx->error, src);
         return -1;
     }
 
@@ -96,36 +96,35 @@ decrypt_header(zip_source_t *src, struct trad_pkware *ctx) {
 
     _zip_pkware_decrypt(&ctx->keys, header, header, ZIP_CRYPTO_PKWARE_HEADERLEN);
 
-    if (zip_source_stat(src, &st)) {
-        /* stat failed, skip password validation */
+    if (zip_source_stat(src, &st) < 0 || (st.valid & ZIP_STAT_CRC) == 0) {
+        /* skip password validation */
         return 0;
     }
 
-    /* password verification - two ways:
-     *  mtime - InfoZIP way, to avoid computing complete CRC before encrypting data
-     *  CRC - old PKWare way
-     */
+    if (zip_source_get_dos_time(src, &dostime) <= 0) {
+        if ((st.valid & ZIP_STAT_MTIME) == 0) {
+            /* no date available, skip password validation */
+            return 0;
+        }
 
-    if (st.valid & ZIP_STAT_MTIME) {
-        unsigned short dostime, dosdate;
-        _zip_u2d_time(st.mtime, &dostime, &dosdate);
-        if (header[ZIP_CRYPTO_PKWARE_HEADERLEN - 1] == dostime >> 8) {
-            ok = true;
+        if (_zip_u2d_time(st.mtime, &dostime, &ctx->error) < 0) {
+            return -1;
         }
     }
 
-    if (st.valid & ZIP_STAT_CRC) {
-        if (header[ZIP_CRYPTO_PKWARE_HEADERLEN - 1] == st.crc >> 24) {
-            ok = true;
-        }
+    /*
+       password verification - two ways:
+       - mtime - InfoZIP way, to avoid computing complete CRC before encrypting data
+       - CRC - old PKWare way
+    */
+    if (header[ZIP_CRYPTO_PKWARE_HEADERLEN - 1] == dostime.time >> 8
+        || header[ZIP_CRYPTO_PKWARE_HEADERLEN - 1] == st.crc >> 24) {
+        return 0;
     }
-
-    if (!ok && ((st.valid & (ZIP_STAT_MTIME | ZIP_STAT_CRC)) != 0)) {
+    else {
         zip_error_set(&ctx->error, ZIP_ER_WRONGPASSWD, 0);
         return -1;
     }
-
-    return 0;
 }
 
 
@@ -147,7 +146,7 @@ pkware_decrypt(zip_source_t *src, void *ud, void *data, zip_uint64_t len, zip_so
 
     case ZIP_SOURCE_READ:
         if ((n = zip_source_read(src, data, len)) < 0) {
-            _zip_error_set_from_source(&ctx->error, src);
+            zip_error_set_from_source(&ctx->error, src);
             return -1;
         }
 
@@ -172,7 +171,7 @@ pkware_decrypt(zip_source_t *src, void *ud, void *data, zip_uint64_t len, zip_so
     }
 
     case ZIP_SOURCE_SUPPORTS:
-        return zip_source_make_command_bitmap(ZIP_SOURCE_OPEN, ZIP_SOURCE_READ, ZIP_SOURCE_CLOSE, ZIP_SOURCE_STAT, ZIP_SOURCE_ERROR, ZIP_SOURCE_FREE, -1);
+        return zip_source_make_command_bitmap(ZIP_SOURCE_OPEN, ZIP_SOURCE_READ, ZIP_SOURCE_CLOSE, ZIP_SOURCE_STAT, ZIP_SOURCE_ERROR, ZIP_SOURCE_FREE, ZIP_SOURCE_SUPPORTS_REOPEN, -1);
 
     case ZIP_SOURCE_ERROR:
         return zip_error_to_data(&ctx->error, data, len);
@@ -182,8 +181,7 @@ pkware_decrypt(zip_source_t *src, void *ud, void *data, zip_uint64_t len, zip_so
         return 0;
 
     default:
-        zip_error_set(&ctx->error, ZIP_ER_INVAL, 0);
-        return -1;
+        return zip_source_pass_to_lower_layer(src, data, len, cmd);
     }
 }
 

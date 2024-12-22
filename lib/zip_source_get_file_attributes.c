@@ -1,9 +1,9 @@
 /*
   zip_source_get_file_attributes.c -- get attributes for file from source
-  Copyright (C) 2020 Dieter Baron and Thomas Klausner
+  Copyright (C) 2020-2022 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -39,8 +39,7 @@ zip_file_attributes_init(zip_file_attributes_t *attributes) {
     attributes->version = 1;
 }
 
-int
-zip_source_get_file_attributes(zip_source_t *src, zip_file_attributes_t *attributes) {
+int zip_source_get_file_attributes(zip_source_t *src, zip_file_attributes_t *attributes) {
     if (src->source_closed) {
         return -1;
     }
@@ -60,8 +59,10 @@ zip_source_get_file_attributes(zip_source_t *src, zip_file_attributes_t *attribu
     if (ZIP_SOURCE_IS_LAYERED(src)) {
         zip_file_attributes_t lower_attributes;
 
+        zip_file_attributes_init(&lower_attributes);
+
         if (zip_source_get_file_attributes(src->src, &lower_attributes) < 0) {
-            _zip_error_set_from_source(&src->error, src->src);
+            zip_error_set_from_source(&src->error, src->src);
             return -1;
         }
 

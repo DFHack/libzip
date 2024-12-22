@@ -1,9 +1,9 @@
 /*
   zip_add_entry.c -- create and init struct zip_entry
-  Copyright (C) 1999-2021 Dieter Baron and Thomas Klausner
+  Copyright (C) 1999-2024 Dieter Baron and Thomas Klausner
 
   This file is part of libzip, a library to manipulate ZIP archives.
-  The authors can be contacted at <libzip@nih.at>
+  The authors can be contacted at <info@libzip.org>
 
   Redistribution and use in source and binary forms, with or without
   modification, are permitted provided that the following conditions
@@ -64,7 +64,7 @@ _zip_add_entry(zip_t *za) {
             return -1;
         }
         rentries = (zip_entry_t *)realloc(za->entry, sizeof(struct zip_entry) * (size_t)nalloc);
-        if (!rentries) {
+        if (rentries == NULL) {
             zip_error_set(&za->error, ZIP_ER_MEMORY, 0);
             return -1;
         }
