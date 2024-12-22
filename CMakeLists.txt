@@ -344,13 +344,11 @@ endif()
 
 
 # pkgconfig file
-file(REAL_PATH ${CMAKE_INSTALL_PREFIX} pc_cmake_install_prefix)
-file(REAL_PATH ${CMAKE_INSTALL_FULL_BINDIR} pc_cmake_install_full_bindir)
-file(RELATIVE_PATH pc_relative_bindir ${pc_cmake_install_prefix} ${pc_cmake_install_full_bindir})
+file(RELATIVE_PATH pc_relative_bindir /${CMAKE_INSTALL_PREFIX} /${CMAKE_INSTALL_FULL_BINDIR})
 set(bindir "\${prefix}/${pc_relative_bindir}")
-file(RELATIVE_PATH pc_relative_libdir ${pc_cmake_install_prefix} ${pc_cmake_install_full_bindir})
+file(RELATIVE_PATH pc_relative_libdir /${CMAKE_INSTALL_PREFIX} /${CMAKE_INSTALL_FULL_BINDIR})
 set(libdir "\${prefix}/${pc_relative_libdir}")
-file(RELATIVE_PATH pc_relative_includedir ${pc_cmake_install_prefix} ${pc_cmake_install_full_bindir})
+file(RELATIVE_PATH pc_relative_includedir /${CMAKE_INSTALL_PREFIX} /${CMAKE_INSTALL_FULL_BINDIR})
 set(includedir "\${prefix}/${pc_relative_includedir}")
 if(CMAKE_SYSTEM_NAME MATCHES BSD)
   set(PKG_CONFIG_RPATH "-Wl,-R\${libdir}")
